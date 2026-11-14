@@ -3,6 +3,7 @@ rem Double-click to start the tracker. Extra options also work, e.g.:
 rem   run_tracker.bat --dry-run
 rem   run_tracker.bat --test-sheet
 cd /d "%~dp0"
+if not exist "config.json" if exist "config.example.json" copy /y "config.example.json" "config.json" >nul
 
 if not exist ".venv\Scripts\python.exe" (
   echo First run: creating a private Python environment...

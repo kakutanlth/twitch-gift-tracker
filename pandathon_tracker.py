@@ -79,7 +79,8 @@ DEFAULT_CONFIG = {
 def load_config() -> dict:
     path = BASE / "config.json"
     if not path.exists():
-        sys.exit(f"config.json is missing (expected at {path}).")
+        sys.exit(f"config.json is missing (expected at {path}). Copy config.example.json to config.json "
+                 "(the launchers do this on first run).")
     try:
         cfg = {**DEFAULT_CONFIG, **json.loads(path.read_text(encoding="utf-8-sig"))}
     except json.JSONDecodeError as exc:

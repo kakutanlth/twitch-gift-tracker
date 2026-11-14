@@ -1,0 +1,12 @@
+# Secrets: the Google key and your own settings (sheet ID, channel). Never commit these.
+service_account.json
+*.json.tmp
+config.json
+
+# Local data written while tracking: events, logs, window preferences
+data/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
