@@ -9,8 +9,9 @@ every sub, resub, Prime sub, gifted sub and bits cheer to the "Points" Google Sh
   Column C  Tier 2 Subs
   Column D  Tier 3 Subs
   Column E  Bits          from cheers of at least min_cheer_bits (100) in one message
+  Column F  Dollars       Ko-fi and Streamlabs donations, only when those are switched on in config.json
   Column I  Bits          from smaller cheers ("<100 Bits cheers")
-  Columns F, G, H and J onwards (Dollars, Bags, Total, Total cheer) are never touched.
+  Columns G, H and J onwards (Bags, Total, Total cheer) are never touched.
 
 Usage (normally through run_tracker.bat):
   python pandathon_tracker.py               run for real
@@ -33,14 +34,16 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import websocket  # pip package "websocket-client"
 
 BASE = Path(__file__).resolve().parent
 CHAT_URL = "wss://irc-ws.chat.twitch.tv:443"
 
-FIELDS = ("t1", "t2", "t3", "bits", "small_bits")
-COLUMN = {"t1": "B", "t2": "C", "t3": "D", "bits": "E", "small_bits": "I"}
+FIELDS = ("t1", "t2", "t3", "bits", "small_bits", "dollars")
+COLUMN = {"t1": "B", "t2": "C", "t3": "D", "bits": "E", "small_bits": "I", "dollars": "F"}
+MONEY_COLUMNS = {"F"}  # Dollars keeps cents; every other column is a whole count
 COLUMN_INDEX = {column: index for index, column in enumerate("ABCDEFGHI")}
 DATA_COLUMNS = "ABCDEFI"  # the columns holding a person's data; G, H and J are formulas
 TIER_BY_PLAN = {"Prime": "t1", "1000": "t1", "2000": "t2", "3000": "t3"}
@@ -73,6 +76,12 @@ DEFAULT_CONFIG = {
     "anonymous_name": "Anonymous",
     "min_cheer_bits": 100,
     "flush_seconds": 3,
+    # Donations (both off until filled in): see "Ko-fi and Streamlabs donations" in README.md
+    "streamlabs_socket_token": "",
+    "kofi_tab": "",
+    "kofi_types": ["Donation", "Subscription"],
+    "kofi_check_seconds": 20,
+    "currency_rates": {"USD": 1},
 }
 
 
@@ -258,7 +267,7 @@ class EventExtractor:
             "kind": kind,
             "key": ANON_KEY if anon else login,
             "name": "" if anon else sheet_name(tags.get("display-name", ""), login),
-            "t1": 0, "t2": 0, "t3": 0, "bits": 0, "small_bits": 0,
+            "t1": 0, "t2": 0, "t3": 0, "bits": 0, "small_bits": 0, "dollars": 0,
         }
         event[field] = amount
         return event
@@ -266,6 +275,9 @@ class EventExtractor:
 
 def describe(event: dict) -> str:
     who = event["name"] or "Anonymous"
+    if event.get("dollars"):
+        source = {"kofi": "Ko-fi", "streamlabs": "Streamlabs"}.get(event["kind"], event["kind"])
+        return f"DONATE {event['dollars']:>8.2f}  {who} ({source})"
     if event["bits"]:
         return f"BITS  {event['bits']:>6}        {who}"
     if event.get("small_bits"):
@@ -275,6 +287,84 @@ def describe(event: dict) -> str:
             label = {"sub": "SUB", "resub": "RESUB"}.get(event["kind"], "GIFT")
             return f"{label:<5} {TIER_LABEL[tier]} x{event[tier]:<4} {who}"
     return f"{event['kind']} {who}"
+
+
+# --------------------------------------------------------------------------- donations (Streamlabs and Ko-fi)
+
+KOFI_HEADERS = ["Received", "Ko-fi time", "Type", "Name", "Amount", "Currency", "Message", "Public",
+                "Transaction ID", "Message ID", "Tracker"]  # the Ko-fi tab kofi_webhook.gs fills
+
+
+def sheet_amount(amount, currency, cfg: dict):
+    """A donation in the sheet's money (Dollars), using currency_rates; None if that currency has no rate."""
+    try:
+        value = float(str(amount).replace(",", ""))
+    except ValueError:
+        return None
+    rates = {str(code).strip().upper(): rate for code, rate in (cfg.get("currency_rates") or {}).items()}
+    rate = rates.get(str(currency or "").strip().upper())
+    return None if rate is None else round(value * float(rate), 2)
+
+
+def donation_event(source: str, donation_id: str, name: str, dollars: float) -> dict:
+    """A Ko-fi or Streamlabs donation as a tracker event, credited to Dollars (column F).
+
+    Donors type their own name, so it is matched against the Name column like a Twitch name, ignoring capitals.
+    """
+    name = str(name or "").strip()
+    anon = not name or name.lower() == "anonymous"
+    return {
+        "id": f"{source}:{donation_id}",
+        "time": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "kind": source,
+        "key": ANON_KEY if anon else Syncer._key_of_name(name),
+        "name": "" if anon else name,
+        "t1": 0, "t2": 0, "t3": 0, "bits": 0, "small_bits": 0, "dollars": dollars,
+    }
+
+
+def streamlabs_events(payload, cfg: dict) -> list:
+    """The donations in one Streamlabs socket message, each as (event, None) or (None, why it is not counted)."""
+    if not isinstance(payload, dict) or payload.get("type") != "donation":
+        return []  # follows, subs and bits: the tracker counts those from chat
+    found = []
+    for item in payload.get("message") or []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("from") or ""
+        label = f"{name or 'Anonymous'}, {item.get('amount')} {item.get('currency') or ''}".strip()
+        donation_id = item.get("id") or item.get("_id")
+        dollars = sheet_amount(item.get("amount"), item.get("currency"), cfg)
+        if item.get("isTest") or item.get("is_test"):
+            found.append((None, f"test alert ({label})"))
+        elif not donation_id:
+            found.append((None, f"no donation ID ({label})"))
+        elif dollars is None:
+            found.append((None, f"no rate for {item.get('currency')} in currency_rates ({label})"))
+        elif dollars <= 0:
+            found.append((None, f"zero amount ({label})"))
+        else:
+            found.append((donation_event("streamlabs", str(donation_id), name, dollars), None))
+    return found
+
+
+def kofi_event(values, cfg: dict):
+    """One row of the Ko-fi tab -> (event or None, the text for its Tracker column)."""
+    values = list(values) + [""] * (len(KOFI_HEADERS) - len(values))
+    _, _, kind, name, amount, currency, _, public, _, message_id = values[:10]
+    kind, message_id = str(kind).strip(), str(message_id).strip()
+    if not message_id:
+        return None, "not counted: no message ID"
+    if kind.lower() not in {str(k).strip().lower() for k in cfg.get("kofi_types") or []}:
+        return None, f"not counted: {kind or 'unknown type'}"
+    dollars = sheet_amount(amount, currency, cfg)
+    if dollars is None:
+        return None, f"not counted: no rate for {currency or 'unknown currency'} in currency_rates"
+    if dollars <= 0:
+        return None, "not counted: zero amount"
+    if str(public).strip().lower() == "no":
+        name = ""  # a private donation: credited to the Anonymous row
+    return donation_event("kofi", message_id, name, dollars), "added"
 
 
 # --------------------------------------------------------------------------- local event log
@@ -455,6 +545,16 @@ class GoogleSheet:
     def headers(self) -> list:
         return self._ws.row_values(1)
 
+    def tab(self, name: str):
+        """Another tab of the same spreadsheet (the Ko-fi tab)."""
+        import gspread
+
+        try:
+            return self._ws.spreadsheet.worksheet(name)
+        except gspread.exceptions.WorksheetNotFound:
+            tabs = ", ".join(repr(ws.title) for ws in self._ws.spreadsheet.worksheets())
+            raise SheetError(f"The spreadsheet has no tab called {name!r} for Ko-fi donations. Its tabs are: {tabs}.")
+
     def read(self) -> list:
         return self._ws.get(f"A{self._top}:I{self._bottom}", value_render_option="UNFORMATTED_VALUE")
 
@@ -480,12 +580,14 @@ class Syncer:
             return grid[r][c]
         return ""
 
-    def _number(self, grid, row, column) -> int:
+    def _number(self, grid, row, column):
+        """A cell as the tracker counts it: a whole number, or money to the cent in Dollars."""
         value = self._cell(grid, row, column)
         if value in ("", None):
             return 0
         try:
-            return int(round(float(str(value).replace(",", ""))))
+            number = float(str(value).replace(",", "").lstrip("$"))
+            return round(number, 2) if column in MONEY_COLUMNS else int(round(number))
         except ValueError:
             log.warning("Cell %s%d contains %r, not a number; treating it as 0", column, row, value)
             return 0
@@ -538,7 +640,7 @@ class Syncer:
         for event in pending:
             entry = totals.setdefault(event["key"], {"name": event["name"], **{field: 0 for field in FIELDS}})
             for field in FIELDS:
-                entry[field] += event.get(field, 0)  # events saved before column I existed have no small_bits
+                entry[field] += event.get(field, 0)  # events saved before a column existed lack that field
 
         data, expect = [], {}
         for key, entry in totals.items():
@@ -560,6 +662,8 @@ class Syncer:
             for field in FIELDS:
                 if entry[field]:
                     value = self._number(grid, row, COLUMN[field]) + entry[field]
+                    if COLUMN[field] in MONEY_COLUMNS:
+                        value = round(value, 2)
                     expect[key][COLUMN[field]] = value
                     data.append({"range": f"{COLUMN[field]}{row}", "values": [[value]]})
 
@@ -756,6 +860,152 @@ def run_flusher(syncer: Syncer, store: Store, wake: threading.Event, stop: threa
             wake.set()
 
 
+STREAMLABS_URL = "wss://sockets.streamlabs.com/socket.io/?EIO=3&transport=websocket&token={token}"
+
+
+class StreamlabsRefused(Exception):
+    pass
+
+
+def run_streamlabs(token: str, on_event, stop: threading.Event, reconnect: threading.Event | None = None, on_state=None):
+    """Stay connected to the Streamlabs Socket API until stop is set, reconnecting whenever the line drops.
+
+    Streamlabs speaks Socket.IO 2 over a websocket: the client pings every pingInterval, and each alert arrives
+    as 42["event", {...}]. on_event gets that {...}. Like chat, nothing is replayed after a disconnection.
+    """
+    def state(value):
+        if on_state:
+            on_state(value)
+
+    url = STREAMLABS_URL.format(token=quote(token, safe=""))
+    backoff = 1.0
+    while not stop.is_set():
+        ws, wait = None, None
+        state("connecting")
+        if reconnect is not None:
+            reconnect.clear()
+        try:
+            ws = websocket.create_connection(url, timeout=20)
+            greeting = ws.recv()
+            if not str(greeting).startswith("0"):
+                raise ConnectionError(f"unexpected greeting {str(greeting)[:60]!r}")
+            info = json.loads(greeting[1:])
+            ping_every = info.get("pingInterval", 25000) / 1000
+            silent_limit = ping_every + info.get("pingTimeout", 20000) / 1000
+            ws.settimeout(1)
+            last_ping = last_rx = time.monotonic()
+            while not stop.is_set():
+                if reconnect is not None and reconnect.is_set():
+                    backoff = 1.0
+                    raise ReconnectRequested()
+                now = time.monotonic()
+                if now - last_ping >= ping_every:
+                    ws.send("2")
+                    last_ping = now
+                if now - last_rx > silent_limit:
+                    raise ConnectionError("Streamlabs went silent")
+                try:
+                    frame = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    continue
+                if not frame:
+                    raise ConnectionError("Streamlabs closed the connection")
+                last_rx = time.monotonic()
+                if frame == "40":
+                    backoff = 1.0
+                    state("connected")
+                    log.info("Streamlabs connected. Listening for donations ...")
+                elif frame.startswith("44"):
+                    raise StreamlabsRefused(frame[2:].strip('"'))
+                elif frame == "1" or frame.startswith("41"):
+                    raise ConnectionError("Streamlabs ended the connection")
+                elif frame.startswith("42"):
+                    try:
+                        name, *args = json.loads(frame[2:])
+                        if name == "event" and args:
+                            on_event(args[0])
+                    except Exception:
+                        log.exception("Could not process this Streamlabs message")
+        except ReconnectRequested:
+            log.info("Reconnecting to Streamlabs ...")
+        except StreamlabsRefused as exc:
+            wait = 300
+            state("refused")
+            log.error("Streamlabs refused the socket token (%s). Check streamlabs_socket_token in config.json. "
+                      "Trying again in about 5 minutes.", exc)
+        except Exception as exc:
+            if not stop.is_set():
+                log.warning("Streamlabs connection lost (%s). Reconnecting in about %.0f s.",
+                            str(exc).replace(token, "***"), backoff)
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+        (reconnect or stop).wait((wait or backoff) + random.random())  # Refresh or Stop cuts the wait short
+        backoff = min(backoff * 2, 60)
+    state("stopped")
+
+
+class KofiInbox:
+    """The Ko-fi tab that kofi_webhook.gs fills. The tracker reads new rows and writes back what it did with each."""
+
+    def __init__(self, sheet: GoogleSheet, tab: str):
+        self._ws = sheet.tab(tab)
+
+    def rows(self) -> list:
+        """(row number, values) for every donation row, oldest first."""
+        values = self._ws.get("A2:K", value_render_option="UNFORMATTED_VALUE")
+        return [(n + 2, row) for n, row in enumerate(values) if any(str(v).strip() for v in row)]
+
+    def mark(self, statuses: dict):
+        if statuses:
+            self._ws.batch_update([{"range": f"K{row}", "values": [[text]]} for row, text in statuses.items()],
+                                  value_input_option="RAW")
+
+
+def check_kofi(inbox, store: Store, cfg: dict) -> int:
+    """Save each new row of the Ko-fi tab as an event, then fill in its Tracker column. Returns how many were new.
+
+    A row whose Tracker column already says anything (including "skip", typed by hand) is left alone. Events are
+    saved before the column is written, and their Ko-fi message ID stops them from ever being counted twice.
+    """
+    statuses, added = {}, 0
+    for row, values in inbox.rows():
+        if len(values) >= len(KOFI_HEADERS) and str(values[len(KOFI_HEADERS) - 1]).strip():
+            continue
+        event, status = kofi_event(values, cfg)
+        if event is None:
+            log.warning("Ko-fi tab row %d %s.", row, status)
+        elif store.add(event):
+            added += 1
+            log.info(describe(event))
+        statuses[row] = status
+    inbox.mark(statuses)
+    return added
+
+
+def run_kofi(inbox, store: Store, cfg: dict, wake: threading.Event, stop: threading.Event,
+             check_now: threading.Event, on_state=None):
+    """Check the Ko-fi tab every kofi_check_seconds until stop is set."""
+    every = max(5, to_int(cfg.get("kofi_check_seconds"), 20))
+    while not stop.is_set():
+        try:
+            if check_kofi(inbox, store, cfg):
+                wake.set()
+            if on_state:
+                on_state("ok")
+        except Exception as exc:
+            if on_state:
+                on_state("error")
+            log.warning("Could not read the Ko-fi tab (%s). Trying again in %d s.", exc, every)
+        check_now.wait(every)  # Refresh or Stop cuts the wait short
+        check_now.clear()
+    if on_state:
+        on_state("stopped")
+
+
 # --------------------------------------------------------------------------- entry point
 
 def setup_logging(to_file: bool):
@@ -813,11 +1063,15 @@ class Tracker:
         self.dry_run = dry_run
         self.data_folder = data_folder or BASE / "data"
         self.chat_state = "not started"
+        self.streamlabs_state = "off"   # off / connecting / connected / refused / stopped
+        self.kofi_state = "off"         # off / starting / ok / error / stopped
         self.store = None
         self.stopping = threading.Event()
         self._wake = threading.Event()        # update the sheet now: new events, or Refresh
         self._retry_now = threading.Event()   # cut short the wait after a failed sheet update
         self._reconnect = threading.Event()   # drop and reopen the chat connection
+        self._streamlabs_reconnect = threading.Event()
+        self._kofi_now = threading.Event()    # check the Ko-fi tab now
         self._extractor = EventExtractor(min_bits=to_int(cfg["min_cheer_bits"], 1))
         self._syncer = None
         self._threads = []
@@ -841,6 +1095,23 @@ class Tracker:
                 self._wake.set()
             self._spawn(run_flusher, self._syncer, self.store, self._wake, self.stopping,
                         self.cfg["flush_seconds"], self._retry_now)
+            kofi_tab = str(self.cfg.get("kofi_tab") or "").strip()
+            if kofi_tab:
+                try:
+                    inbox = KofiInbox(sheet, kofi_tab)
+                except Exception as exc:
+                    log.error("Ko-fi donations are off: %s", exc)
+                else:
+                    self.kofi_state = "starting"
+                    log.info("Ko-fi donations: checking the %r tab every %d s.", kofi_tab,
+                             max(5, to_int(self.cfg.get("kofi_check_seconds"), 20)))
+                    self._spawn(run_kofi, inbox, self.store, self.cfg, self._wake, self.stopping,
+                                self._kofi_now, self._set_kofi_state)
+        token = str(self.cfg.get("streamlabs_socket_token") or "").strip()
+        if token:
+            self.streamlabs_state = "connecting"
+            self._spawn(run_streamlabs, token, self._on_streamlabs, self.stopping, self._streamlabs_reconnect,
+                        self._set_streamlabs_state)
         self._spawn(run_chat, self.cfg["channel"], self._on_message, self.stopping, self._reconnect, self._set_chat_state)
         return True
 
@@ -859,8 +1130,24 @@ class Tracker:
             log.info(describe(event))
             self._wake.set()
 
+    def _on_streamlabs(self, payload):
+        for event, why in streamlabs_events(payload, self.cfg):
+            if event is None:
+                log.warning("Streamlabs donation not counted: %s.", why)
+            elif self.store is None:
+                log.info(describe(event))
+            elif self.store.add(event):
+                log.info(describe(event))
+                self._wake.set()
+
     def _set_chat_state(self, state: str):
         self.chat_state = state
+
+    def _set_streamlabs_state(self, state: str):
+        self.streamlabs_state = state
+
+    def _set_kofi_state(self, state: str):
+        self.kofi_state = state
 
     @property
     def syncer(self):
@@ -872,21 +1159,25 @@ class Tracker:
         return len(self.store.pending()) if self.store else 0
 
     def refresh(self):
-        """Reconnect to chat and write any saved events to the sheet now (the window's Refresh button)."""
-        log.info("Refresh: reconnecting to chat and writing any saved events now.")
+        """Reconnect to chat (and Streamlabs), check the Ko-fi tab, and write any saved events to the sheet now."""
+        log.info("Refresh: reconnecting and writing any saved events now.")
         self._reconnect.set()
+        self._streamlabs_reconnect.set()
+        self._kofi_now.set()
         self._retry_now.set()
         self._wake.set()
 
     def request_stop(self):
-        """Ask both threads to stop without waiting for them."""
+        """Ask every thread to stop without waiting for them."""
         self.stopping.set()
         self._wake.set()
         self._retry_now.set()
         self._reconnect.set()
+        self._streamlabs_reconnect.set()
+        self._kofi_now.set()
 
     def stop(self, timeout: float = 15):
-        """Stop listening, write whatever is still waiting, and wait for both threads to finish."""
+        """Stop listening, write whatever is still waiting, and wait for every thread to finish."""
         self.request_stop()
         for thread in self._threads:
             thread.join(timeout)

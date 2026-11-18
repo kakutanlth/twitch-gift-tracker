@@ -8,5 +8,15 @@
   "anonymous_row": 2,
   "anonymous_name": "Anonymous",
   "min_cheer_bits": 100,
-  "flush_seconds": 3
+  "flush_seconds": 3,
+  "streamlabs_socket_token": "",
+  "kofi_tab": "",
+  "kofi_types": [
+    "Donation",
+    "Subscription"
+  ],
+  "kofi_check_seconds": 20,
+  "currency_rates": {
+    "USD": 1
+  }
 }

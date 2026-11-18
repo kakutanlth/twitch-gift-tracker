@@ -1,5 +1,5 @@
 """Offline tests for the tracker: fake sheet, injected failures, gift-bundle de-duplication."""
-import importlib.util, shutil, sys, tempfile, threading, time
+import importlib.util, logging, shutil, sys, tempfile, threading, time
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("tracker", sys.argv[1])
@@ -316,6 +316,8 @@ try:
 finally:
     t.GoogleSheet, t.log.disabled = real_sheet, False
 
+CHEER_FIELDS = ("t1", "t2", "t3", "bits", "small_bits")
+
 # ---- 11. cheers under the minimum go to small_bits (column I) instead of bits; subs are unaffected
 def cheer(login, display, bits, msg_id):
     return (f"@badges=;bits={bits};display-name={display};id={msg_id};room-id=1 "
@@ -332,11 +334,11 @@ cheers = [
 ]
 results += [
     check("100-bit minimum: 99 and 50s go to small_bits; 100, 150 and anonymous 200 go to bits in full",
-          feed(t.EventExtractor(min_bits=100), cheers, fields=t.FIELDS),
+          feed(t.EventExtractor(min_bits=100), cheers, fields=CHEER_FIELDS),
           {("small", "Small"): [0, 0, 0, 0, 99], ("exact", "Exact"): [0, 0, 0, 100, 0], ("big", "Big"): [0, 0, 0, 150, 0],
            (t.ANON_KEY, ""): [0, 0, 0, 200, 50], ("twice", "Twice"): [0, 0, 0, 0, 100]}),
     check("subs are not affected by the cheer minimum",
-          feed(t.EventExtractor(min_bits=100), [notice("sub", "primer", "Primer", plan="Prime")], fields=t.FIELDS),
+          feed(t.EventExtractor(min_bits=100), [notice("sub", "primer", "Primer", plan="Prime")], fields=CHEER_FIELDS),
           {("primer", "Primer"): [1, 0, 0, 0, 0]}),
 ]
 
@@ -468,6 +470,206 @@ waited = full_row(held, 3)[0] == "Held"
 sync._flush_lock.release()
 worker.join(5)
 results.append(check("delete waits for a sheet update in progress, then runs", (waited, full_row(held, 3)[0]), (True, "")))
+
+# ---- 15. donations: Dollars (column F) keeps cents, matches names ignoring capitals, survives a lost reply
+RATES = {**TOP, "currency_rates": {"USD": 1, "JPY": 0.0065}, "kofi_types": ["Donation", "Subscription"]}
+sheet = FakeSheet({"A2": "Anonymous", "F2": 1.5, "A3": "Jo Example", "B3": 1, "F3": 2.25})
+sheet.allowed = "ABCDEFI"
+store = t.Store(None)
+sync = t.Syncer(store, sheet, RATES)
+store.add(t.donation_event("kofi", "k1", "JO EXAMPLE", 3.25))
+store.add(t.donation_event("streamlabs", "s1", "New Donor", 10))
+store.add(t.donation_event("kofi", "k2", "", 4.5))
+store.add(t.donation_event("kofi", "k3", "Jo Example", 0.1))
+sync.flush()
+results += [
+    check("donations: added to an existing row by name (ignoring capitals), cents kept",
+          full_row(sheet, 3), ["Jo Example", 1, "", "", "", 5.6, ""]),
+    check("donations: a new donor gets a row with only Name and Dollars", full_row(sheet, 4), ["New Donor", "", "", "", "", 10, ""]),
+    check("donations: anonymous goes to the Anonymous row", full_row(sheet, 2)[5], 6.0),
+    check("donations: the same donation ID is never saved twice", store.add(t.donation_event("kofi", "k1", "Jo Example", 3.25)), False),
+]
+sheet.fail = "after"
+store.add(t.donation_event("kofi", "k4", "Jo Example", 1.15))
+try:
+    sync.flush()
+except TimeoutError:
+    pass
+sync.flush()
+results.append(check("donations: a lost reply does not count cents twice", full_row(sheet, 3)[5], 6.75))
+
+# ---- 16. Ko-fi tab rows and Streamlabs socket messages become events; the rest are explained, not counted
+def kofi_result(row):
+    event, status = t.kofi_event(row, RATES)
+    return (event["key"], event["dollars"], status) if event else (None, None, status)
+
+results.append(check("Ko-fi rows: donation, subscription, private, yen converted; others refused with a reason", [kofi_result(r) for r in (
+    ["", "", "Donation", "Jo", 3, "USD", "hi", "yes", "tx1", "m1"],
+    ["", "", "Subscription", "Sub Person", "5.00", "usd", "", "yes", "tx2", "m2"],
+    ["", "", "Donation", "Secret", 2, "USD", "", "no", "tx3", "m3"],
+    ["", "", "Donation", "Yen Fan", 1000, "JPY", "", "yes", "tx4", "m4"],
+    ["", "", "Shop Order", "Buyer", 20, "USD", "", "yes", "tx5", "m5"],
+    ["", "", "Donation", "Euro Fan", 5, "EUR", "", "yes", "tx6", "m6"],
+    ["", "", "Donation", "No Id", 5, "USD", "", "yes", "", ""],
+)], [
+    ("jo", 3.0, "added"), ("sub person", 5.0, "added"), (t.ANON_KEY, 2.0, "added"), ("yen fan", 6.5, "added"),
+    (None, None, "not counted: Shop Order"), (None, None, "not counted: no rate for EUR in currency_rates"),
+    (None, None, "not counted: no message ID"),
+]))
+
+class FakeInbox:
+    def __init__(self, rows):
+        self.data = {n: list(r) for n, r in rows.items()}
+
+    def rows(self):
+        return sorted(self.data.items())
+
+    def mark(self, statuses):
+        for row, text in statuses.items():
+            self.data[row] = (self.data[row] + [""] * 11)[:10] + [text]
+
+inbox = FakeInbox({
+    2: ["", "", "Donation", "Jo", 3, "USD", "", "yes", "tx1", "m1"],
+    3: ["", "", "Shop Order", "Buyer", 20, "USD", "", "yes", "tx5", "m5"],
+    4: ["", "", "Donation", "Script_Test", 1, "USD", "", "yes", "test", "test-1", "skip"],
+})
+store = t.Store(None)
+t.log.disabled = True
+try:
+    first = t.check_kofi(inbox, store, RATES)
+    again = t.check_kofi(inbox, store, RATES)
+    inbox.data[2][10] = ""  # as if writing "added" had failed: it must still not count twice
+    third = t.check_kofi(inbox, store, RATES)
+finally:
+    t.log.disabled = False
+results.append(check("Ko-fi tab: new rows counted once, Tracker column filled, rows marked skip left alone",
+                     (first, again, third, len(store.pending()), [inbox.data[r][10] for r in (2, 3, 4)]),
+                     (1, 0, 0, 1, ["added", "not counted: Shop Order", "skip"])))
+
+payload = {"type": "donation", "message": [
+    {"id": 101, "name": "Tipper", "amount": "13.37", "currency": "USD", "formatted_amount": "$13.37"},
+    {"id": 102, "name": "Anonymous", "amount": 5, "currency": "USD"},
+    {"id": 103, "name": "Yen", "amount": "500", "currency": "JPY"},
+    {"id": 104, "name": "Euro", "amount": "5", "currency": "EUR"},
+    {"id": 105, "name": "Tester", "amount": "1", "currency": "USD", "isTest": True},
+    {"name": "No Id", "amount": "1", "currency": "USD"},
+]}
+results += [
+    check("Streamlabs donations: counted, anonymous, converted; unknown currency, tests and missing IDs refused",
+          [(e["id"], e["key"], e["dollars"]) if e else (None, why.split(" (")[0])
+           for e, why in t.streamlabs_events(payload, RATES)],
+          [("streamlabs:101", "tipper", 13.37), ("streamlabs:102", t.ANON_KEY, 5.0), ("streamlabs:103", "yen", 3.25),
+           (None, "no rate for EUR in currency_rates"), (None, "test alert"), (None, "no donation ID")]),
+    check("Streamlabs follows, subs and bits are left to chat", t.streamlabs_events({"type": "follow", "message": [{"name": "x"}]}, RATES), []),
+]
+
+# ---- 17. the Streamlabs socket: Socket.IO 2 greeting, pings, events, a refused token; the token never reaches the log
+class FakeSocket:
+    def __init__(self, frames, stop):
+        self.frames, self.stop, self.sent = list(frames), stop, []
+
+    def recv(self):
+        if not self.frames:
+            raise t.websocket.WebSocketTimeoutException()
+        frame = self.frames.pop(0)
+        if not self.frames:
+            self.stop.set()  # end the test after this frame
+        return frame
+
+    def send(self, text):
+        self.sent.append(text)
+
+    def settimeout(self, seconds):
+        pass
+
+    def close(self):
+        pass
+
+class Capture(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append(record.getMessage())
+
+def socket_run(frames, token):
+    stop, sockets, urls, events, states = threading.Event(), [], [], [], []
+
+    def connect(url, timeout):
+        urls.append(url)
+        sockets.append(FakeSocket(frames, stop))
+        return sockets[-1]
+
+    capture, real_connect = Capture(), t.websocket.create_connection
+    t.websocket.create_connection = connect
+    t.log.addHandler(capture)
+    t.log.propagate = False
+    try:
+        t.run_streamlabs(token, events.append, stop, None, states.append)
+    finally:
+        t.websocket.create_connection = real_connect
+        t.log.removeHandler(capture)
+        t.log.propagate = True
+    return urls, sockets, events, states, capture.lines
+
+greeting = '0{"sid":"x","upgrades":[],"pingInterval":0,"pingTimeout":20000}'
+urls, sockets, events, states, lines = socket_run(
+    [greeting, "40", '42["event",{"type":"donation","message":[{"id":7,"name":"A","amount":"2","currency":"USD"}]}]'],
+    "se cret/token")
+results.append(check("Streamlabs socket: token sent safely, pings sent, event delivered, states reported", (
+    urls[0].endswith("token=se%20cret%2Ftoken"), "2" in sockets[0].sent, events[0]["message"][0]["id"], states),
+    (True, True, 7, ["connecting", "connected", "stopped"])))
+urls, sockets, events, states, lines = socket_run([greeting, '44"Authentication error"'], "bad-token-123")
+results.append(check("Streamlabs socket: a refused token is reported, without the token itself", (
+    events, states, any("refused the socket token" in l for l in lines), any("bad-token-123" in l for l in lines)),
+    ([], ["connecting", "refused", "stopped"], True, False)))
+
+# ---- 18. Tracker with donations switched on: Streamlabs and Ko-fi donations reach the sheet next to chat
+fake = FakeSheet({"A2": "Anonymous"})
+fake.allowed = "ABCDEFI"
+kofi_inbox = FakeInbox({2: ["", "", "Donation", "Kofi Fan", 4, "USD", "", "yes", "tx9", "m9"]})
+
+def fake_streamlabs(token, on_event, stop, reconnect=None, on_state=None):
+    on_state("connected")
+    on_event({"type": "donation", "message": [{"id": 55, "name": "Labs Fan", "amount": "2.50", "currency": "USD"}]})
+    stop.wait()
+    on_state("stopped")
+
+def quiet_chat(channel, on_message, stop, reconnect=None, on_state=None):
+    on_state("connected")
+    stop.wait()
+    on_state("stopped")
+
+real = (t.run_chat, t.run_streamlabs, t.GoogleSheet, t.KofiInbox)
+t.run_chat, t.run_streamlabs, t.GoogleSheet = quiet_chat, fake_streamlabs, (lambda cfg: fake)
+t.KofiInbox = lambda sheet, tab: kofi_inbox
+t.log.disabled = True
+tmp = Path(tempfile.mkdtemp())
+try:
+    tracker = t.Tracker({**RATES, "channel": "chan", "min_cheer_bits": 100, "flush_seconds": 0,
+                         "streamlabs_socket_token": "tok", "kofi_tab": "Ko-fi", "kofi_check_seconds": 5}, data_folder=tmp)
+    started = tracker.start()
+    wait_for(lambda: full_row(fake, 3)[0] and full_row(fake, 4)[0] and not tracker.pending())
+    states_running = (tracker.streamlabs_state, tracker.kofi_state)
+    tracker.stop()
+    rows = sorted([full_row(fake, 3), full_row(fake, 4)])
+    results += [
+        check("Tracker: both donation sources started", (started, states_running), (True, ("connected", "ok"))),
+        check("Tracker: Streamlabs and Ko-fi donations written to Dollars",
+              rows, [["Kofi Fan", "", "", "", "", 4, ""], ["Labs Fan", "", "", "", "", 2.5, ""]]),
+        check("Tracker: Ko-fi row marked added", kofi_inbox.data[2][10], "added"),
+    ]
+finally:
+    t.run_chat, t.run_streamlabs, t.GoogleSheet, t.KofiInbox = real
+    t.log.disabled = False
+    shutil.rmtree(tmp, ignore_errors=True)
+
+# ---- 19. donations stay off unless switched on in config.json
+plain = t.Tracker({**TOP, "channel": "chan", "min_cheer_bits": 100, "flush_seconds": 3, **{
+    k: t.DEFAULT_CONFIG[k] for k in ("streamlabs_socket_token", "kofi_tab", "kofi_types", "kofi_check_seconds", "currency_rates")}})
+results.append(check("donations are off by default", (plain.streamlabs_state, plain.kofi_state,
+                     t.DEFAULT_CONFIG["streamlabs_socket_token"], t.DEFAULT_CONFIG["kofi_tab"]), ("off", "off", "", "")))
 
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

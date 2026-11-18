@@ -330,7 +330,16 @@ class App:
         if state == "running" and tracker is not None:
             chat = {"connected": "chat connected", "connecting": "connecting to chat ..."}.get(tracker.chat_state, tracker.chat_state)
             headline = f"Tracking #{tracker.cfg['channel']}"
-            detail = f"{chat}   ·   events waiting for the sheet: {tracker.pending()}"
+            parts = [chat]
+            if tracker.streamlabs_state != "off":
+                parts.append({"connected": "Streamlabs connected", "connecting": "connecting to Streamlabs ...",
+                              "refused": "Streamlabs refused the token"}
+                             .get(tracker.streamlabs_state, f"Streamlabs {tracker.streamlabs_state}"))
+            if tracker.kofi_state != "off":
+                parts.append({"ok": "Ko-fi tab checked", "starting": "checking the Ko-fi tab ...",
+                              "error": "Ko-fi tab unreachable"}.get(tracker.kofi_state, f"Ko-fi {tracker.kofi_state}"))
+            parts.append(f"events waiting for the sheet: {tracker.pending()}")
+            detail = "   ·   ".join(parts)
         elif state == "starting":
             headline, detail = "Starting ...", "opening the Google Sheet"
         elif state == "stopping":

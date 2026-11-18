@@ -5,6 +5,7 @@ A small Windows app that listens to a Twitch channel's chat and adds every sub, 
 - Counts new subs, resubs, Prime subs and gifted subs (credited to the gifter), by tier.
 - Counts cheers: 100 bits or more in one message go to **Bits**; smaller cheers go to their own column.
 - Puts anonymous gifts and cheers on one **Anonymous** row.
+- Optionally adds **Ko-fi** and **Streamlabs** donations to the donor's **Dollars**, as they arrive.
 - Reads chat anonymously: no Twitch login or Twitch app is needed.
 - Saves every event on your PC before writing it to the sheet, so restarts and Google outages do not lose or double-count anything.
 - Comes with a window (Start/Stop, Refresh, Sheet config, Delete row, light/dark theme) and a plain console version.
@@ -23,10 +24,11 @@ A small Windows app that listens to a Twitch channel's chat and adds every sub, 
    6. [Test it before the event](#6-test-it-before-the-event)
 3. [Using the tracker](#using-the-tracker)
 4. [What gets counted](#what-gets-counted)
-5. [Configuration reference](#configuration-reference)
-6. [Files](#files)
-7. [Troubleshooting](#troubleshooting)
-8. [Keeping your key safe](#keeping-your-key-safe)
+5. [Ko-fi and Streamlabs donations (optional)](#ko-fi-and-streamlabs-donations-optional)
+6. [Configuration reference](#configuration-reference)
+7. [Files](#files)
+8. [Troubleshooting](#troubleshooting)
+9. [Keeping your keys safe](#keeping-your-keys-safe)
 
 ---
 
@@ -93,7 +95,7 @@ The tracker writes to Google Sheets with a *service account*: a robot Google acc
 
 Note the service account's email address (it ends in `.iam.gserviceaccount.com`). You will share the sheet with it in the next step; the tracker window also shows it under **Sheet config**.
 
-> `service_account.json` is a password. Do not share it, email it, or commit it to Git. See [Keeping your key safe](#keeping-your-key-safe).
+> `service_account.json` is a password. Do not share it, email it, or commit it to Git. See [Keeping your keys safe](#keeping-your-keys-safe).
 
 ### 4. Prepare the Google Sheet
 
@@ -106,7 +108,7 @@ The tracker expects one tab (sheet) laid out like this. The default tab name is 
 | C | Tier 2 Subs | Tracker |
 | D | Tier 3 Subs | Tracker |
 | E | Bits | Tracker (cheers of 100 bits or more) |
-| F | Dollars | You (for example, donations entered by hand) |
+| F | Dollars | You, or the tracker once [Ko-fi or Streamlabs donations](#ko-fi-and-streamlabs-donations-optional) are switched on |
 | G | Bags | Your formula |
 | H | Total | Your formula |
 | I | <100 Bits cheers | Tracker (cheers under 100 bits) |
@@ -148,7 +150,7 @@ Do these once, before the stream:
    .venv\Scripts\python.exe selftest.py pandathon_tracker.py
    ```
 
-   It should end with `65/65 passed`.
+   It should end with `80/80 passed`.
 
 2. **Watch chat without writing anything:**
 
@@ -175,13 +177,13 @@ Start the window with **`run_tracker_gui.bat`**. The buttons and settings are in
 | Control | What it does |
 |---|---|
 | **Start tracking / Stop tracking** | One button. Start saves the settings, opens the sheet and connects to chat. If Google cannot be reached, it keeps trying (after 5 seconds, then up to every 60 seconds). Stop writes anything still waiting, then disconnects. |
-| **Refresh** | Reconnects to chat and writes any saved events to the sheet right away. Only while tracking. |
+| **Refresh** | Reconnects to chat (and Streamlabs), checks the Ko-fi tab, and writes any saved events to the sheet right away. Only while tracking. |
 | **Sheet config** | Popup with the **Sheet URL** and **Sheet name**, then **Save**, **Cancel** and **Open sheet**. Save checks the sheet with Google and asks you to confirm, or explains what is wrong (a wrong sheet name lists the real tab names). The sheet can only be changed while tracking is stopped. **Open sheet** opens the saved sheet in your browser. |
 | **Delete row ...** | Popup to remove one person: choose **Delete row number** or **Delete username** (not case sensitive), type it, and press **Delete**. A warning shows that row's numbers before anything changes. See [Deleting a row](#deleting-a-row). |
 | **☾ Dark / ☀ Light** (top right) | Switches the window between dark and light. The choice is remembered; the first time, it follows your Windows setting. |
 | **Settings** | **Twitch channel** and **Cheer minimum (bits)**, saved to `config.json`. They can be changed while tracking is stopped. |
 
-The line under the title shows the state (**Stopped**, **Starting**, **Tracking #channel**, **Stopping**), whether chat is connected, and how many events are waiting to be written to the sheet. Warnings in the log are amber and errors are red; the log is also saved to `data/tracker.log`.
+The line under the title shows the state (**Stopped**, **Starting**, **Tracking #channel**, **Stopping**), whether chat (and Streamlabs and the Ko-fi tab, when switched on) is connected, and how many events are waiting to be written to the sheet. Warnings in the log are amber and errors are red; the log is also saved to `data/tracker.log`.
 
 **During the event:**
 
@@ -223,6 +225,7 @@ Do not run the window and the console version at the same time; both would write
 | Cheer of 100 bits or more in one message | The full amount in **Bits** (column E) |
 | Cheer under 100 bits | The amount in **<100 Bits cheers** (column I) |
 | Anonymous gift or anonymous cheer | The Anonymous row, by the same rules |
+| Ko-fi or Streamlabs donation (when switched on) | The amount in **Dollars** (column F) for the donor's name; private or anonymous donations on the Anonymous row |
 
 Not counted:
 
@@ -233,6 +236,65 @@ Not counted:
 - Events from the other channel during a Shared Chat session.
 
 **Names:** a viewer's row is found by name, ignoring capitals. If the display name is not just the login (for example, a non-Latin name), the login is added in brackets, like `熊猫 (panda_jp)`, and the row is matched by that login.
+
+---
+
+## Ko-fi and Streamlabs donations (optional)
+
+The tracker can add Ko-fi and Streamlabs donations to **Dollars (column F)** of the donor's row, next to their subs and bits. Both are **off** until you switch them on in `config.json`. Everything else works the same either way.
+
+Before you switch them on:
+
+- **Stop entering these donations into Dollars by hand**, or they will be counted twice.
+- **Donors type their own name** on Ko-fi and Streamlabs. The tracker matches it to the Name column, ignoring capitals, like a Twitch name. If a donor uses a different name, they get a separate row; move the amount by hand and remove the extra row with **Delete row**.
+- **Set the currency.** `currency_rates` in `config.json` turns each donation into the sheet's money. The default, `{"USD": 1}`, counts US dollars as they are. To also accept, say, yen at a fixed rate you choose: `{"USD": 1, "JPY": 0.0065}`. A donation in a currency that is not listed is **not counted**, and the log says so.
+
+### Streamlabs
+
+The tracker listens to the streamer's Streamlabs **Socket API**, which announces each Streamlabs tip with its exact amount and an ID.
+
+1. **The streamer:** log in at [streamlabs.com](https://streamlabs.com), open **Settings** (under *Account* in the left sidebar) > **API Settings** > **API Tokens**, and press **Copy** next to **Your Socket API Token**. Send it to you privately, never in chat. It can be reset on the same page if it ever leaks.
+2. **You:** add it to `config.json`:
+
+   ```json
+   "streamlabs_socket_token": "the token",
+   ```
+
+3. Start tracking. The status line shows **Streamlabs connected**, and each tip appears in the log as `DONATE     5.00  Name (Streamlabs)`.
+
+Notes:
+
+- Tips are only received **while tracking is running**; Streamlabs does not send them again later.
+- Only Streamlabs tips are counted from it. Follows, subs and bits that Streamlabs also announces are ignored, because the tracker counts those from chat. Ko-fi donations do not come through Streamlabs.
+- Alerts marked as tests are ignored. If a test is counted anyway, remove it with **Delete row** (or fix the amount by hand).
+
+### Ko-fi
+
+Ko-fi sends each donation to a web address (a *webhook*). `kofi_webhook.gs` is a small Google Apps Script, attached to your spreadsheet, that receives them and writes each one as a row on a **Ko-fi** tab. While tracking, the tracker checks that tab every 20 seconds and adds new rows to Dollars. Donations made while the tracker is off wait on the tab until it runs again, and each one is counted only once.
+
+1. **The streamer:** log in at [ko-fi.com](https://ko-fi.com) and open **Settings > More > API** (or go to `https://ko-fi.com/manage/webhooks`).
+   - Check whether the **webhook URL** box already has an address. Ko-fi allows only one; replacing it would break whatever uses it now (a bot or alert tool). If it is in use, stop and sort that out first.
+   - Open **Advanced**, copy the **Verification Token**, and send it to you privately.
+2. **You:** open the Google Sheet, then **Extensions > Apps Script**. Delete everything in the editor, paste the whole of `kofi_webhook.gs`, put the token between the quotes on the `VERIFICATION_TOKEN` line, and press **Save**.
+3. **Test the script:** choose `testDonation` in the function list at the top and press **Run**. Google asks for permission the first time; your own script is unverified, so choose **Advanced > Go to (your project) (unsafe)** and **Allow**. A **Ko-fi** tab appears with a `Script_Test` row. Type `skip` in that row's **Tracker** column.
+4. **Publish it:** **Deploy > New deployment**, press the gear next to *Select type* and choose **Web app**. Set **Execute as: Me** and **Who has access: Anyone**, press **Deploy**, and copy the **Web app URL** (it ends in `/exec`).
+5. **The streamer:** paste that URL into Ko-fi's **webhook URL** box and press **Update**. Then send a test from the same page: a new row should appear on the Ko-fi tab within seconds. Type `skip` in its Tracker column too.
+6. **You:** add this to `config.json`, then start tracking:
+
+   ```json
+   "kofi_tab": "Ko-fi",
+   ```
+
+   The status line shows **Ko-fi tab checked**. Each row the tracker counts gets `added` in its **Tracker** column; other rows get `not counted:` and the reason.
+
+How the Ko-fi tab works:
+
+- Columns: Received, Ko-fi time, Type, Name, Amount, Currency, Message, Public, Transaction ID, Message ID, Tracker.
+- Only the types in `kofi_types` are counted (`Donation` and `Subscription` by default). Shop orders and commissions are listed but not counted.
+- A **private** donation (the supporter chose not to show it publicly) keeps its name and message off the sheet, and its amount goes to the Anonymous row.
+- Supporters' email addresses are never stored.
+- To leave a row out, type `skip` in its Tracker column. Do not delete rows from the Ko-fi tab while tracking.
+- If you change the script later, publish it with **Deploy > Manage deployments**, the pencil icon, **Version: New version**, **Deploy**. That keeps the same web address; a *new* deployment would get a new one, and the streamer would have to paste it into Ko-fi again.
 
 ---
 
@@ -252,6 +314,11 @@ Not counted:
 | `anonymous_name` | `Anonymous` | Name written in column A of the Anonymous row. |
 | `min_cheer_bits` | `100` | Cheers below this (in one message) go to column I instead of Bits. |
 | `flush_seconds` | `3` | How long to collect a burst of events (such as a gift bundle) into one sheet update. |
+| `streamlabs_socket_token` | (empty) | The streamer's Streamlabs Socket API token. Empty: Streamlabs donations are off. |
+| `kofi_tab` | (empty) | The tab `kofi_webhook.gs` writes to, normally `Ko-fi`. Empty: Ko-fi donations are off. |
+| `kofi_types` | `["Donation", "Subscription"]` | Which Ko-fi payment types count. |
+| `kofi_check_seconds` | `20` | How often the Ko-fi tab is checked while tracking. |
+| `currency_rates` | `{"USD": 1}` | How much one unit of each currency adds to Dollars. Donations in other currencies are not counted. |
 
 Example: Anonymous on the **last** row instead, with people in rows 2 to 249:
 
@@ -274,6 +341,7 @@ Example: Anonymous on the **last** row instead, with people in rows 2 to 249:
 | `selftest.py` | Offline tests: `.venv\Scripts\python.exe selftest.py pandathon_tracker.py` |
 | `requirements.txt` | The two Python libraries: `websocket-client` and `gspread`. |
 | `config.example.json` | Template for `config.json`. |
+| `kofi_webhook.gs` | The Google Apps Script that receives Ko-fi donations (optional). Paste it into the spreadsheet; this copy keeps a placeholder for the token. |
 | `config.json` | Your settings. Created on first run; **not** in Git. |
 | `service_account.json` | Your Google key. You add it; **not** in Git. |
 | `data/events.jsonl` | Every counted event, saved before it is written to the sheet. |
@@ -300,11 +368,16 @@ Events that were saved but not yet written (for example, during an internet outa
 | *Twitch has not confirmed joining #channel. Is the channel name right?* | Check the channel name under Settings. |
 | *No empty row left for new people in rows 3 to 250.* | Free up rows, or raise `last_data_row` (and add rows and formulas). Nothing is lost: the tracker catches up by itself. |
 | *Could not update the sheet (...). Events are saved; retrying in N s.* | Usually a short Google or internet outage. It retries by itself; press **Refresh** to retry now. |
+| *Streamlabs refused the socket token* | The token is wrong or was reset. Ask the streamer for the current one. |
+| *Ko-fi donations are off: The spreadsheet has no tab called 'Ko-fi'* | The script has not written its first row yet, or `kofi_tab` does not match the tab's name. Run `testDonation` in the script once. |
+| *Ko-fi tab row N not counted: no rate for JPY in currency_rates* (or *Streamlabs donation not counted: ...*) | Add that currency to `currency_rates`, then type the amount into Dollars by hand for that donation. |
+| A Ko-fi donation never appears on the Ko-fi tab | Check the Web app URL in Ko-fi's webhook box, that **Who has access** is **Anyone**, and that `VERIFICATION_TOKEN` in the script matches Ko-fi's. |
 | The window does not appear | In a terminal in the tracker folder, run `.venv\Scripts\python.exe pandathon_gui.py` to see the error. |
 
 ---
 
-## Keeping your key safe
+## Keeping your keys safe
 
 - `service_account.json` can write to every sheet shared with it. The `.gitignore` in this repository keeps it, `config.json` and the `data/` folder out of Git. Check `git status` before every commit.
+- The Streamlabs socket token lives in `config.json`, so Git ignores it too. The Ko-fi verification token belongs only in the copy of `kofi_webhook.gs` inside the spreadsheet; keep the copy in this repository with its placeholder.
 - If the key was ever shared or committed, replace it: in Google Cloud, open the service account, go to **Keys**, delete the old key, and create a new one ([step 3](#3-create-the-google-key), parts 4 and 5). Deleting a file from Git does not remove it from the repository's history.
