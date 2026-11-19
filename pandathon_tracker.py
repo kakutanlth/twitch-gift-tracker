@@ -292,7 +292,8 @@ def describe(event: dict) -> str:
 # --------------------------------------------------------------------------- donations (Streamlabs and Ko-fi)
 
 KOFI_HEADERS = ["Received", "Ko-fi time", "Type", "Name", "Amount", "Currency", "Message", "Public",
-                "Transaction ID", "Message ID", "Tracker"]  # the Ko-fi tab kofi_webhook.gs fills
+                "Transaction ID", "Message ID", "Tracker"]  # the Ko-fi tab kofi_webhook.gs fills (its
+                                                             # Forwarded column comes after these and is not read)
 
 
 def sheet_amount(amount, currency, cfg: dict):

@@ -272,13 +272,28 @@ Notes:
 
 Ko-fi sends each donation to a web address (a *webhook*). `kofi_webhook.gs` is a small Google Apps Script, attached to your spreadsheet, that receives them and writes each one as a row on a **Ko-fi** tab. While tracking, the tracker checks that tab every 20 seconds and adds new rows to Dollars. Donations made while the tracker is off wait on the tab until it runs again, and each one is counted only once.
 
+Ko-fi allows **only one** webhook address. If the streamer's Ko-fi already sends donations somewhere, such as a Megathon timer or goal widget, the script **passes every donation on to that address first**, exactly as Ko-fi sent it, so it keeps working:
+
+```
+Ko-fi  ->  this script  ->  1. the old address (the widget), unchanged
+                            2. the Ko-fi tab  ->  the tracker
+```
+
+- Nothing on the sheet side can hold up or block the pass-on, and a donation Ko-fi sends twice is passed on only once, so a timer never gets the same donation twice.
+- The **Forwarded** column on the Ko-fi tab shows whether each donation reached the old address.
+- To undo it at any time, the streamer pastes the old address back into Ko-fi.
+
 1. **The streamer:** log in at [ko-fi.com](https://ko-fi.com) and open **Settings > More > API** (or go to `https://ko-fi.com/manage/webhooks`).
-   - Check whether the **webhook URL** box already has an address. Ko-fi allows only one; replacing it would break whatever uses it now (a bot or alert tool). If it is in use, stop and sort that out first.
+   - If the **webhook URL** box already has an address, copy it **exactly** and send it to you privately, and keep a copy yourselves: it is needed to undo the change. Ask the streamer what it is for, so you know what to check in step 5.
    - Open **Advanced**, copy the **Verification Token**, and send it to you privately.
-2. **You:** open the Google Sheet, then **Extensions > Apps Script**. Delete everything in the editor, paste the whole of `kofi_webhook.gs`, put the token between the quotes on the `VERIFICATION_TOKEN` line, and press **Save**.
-3. **Test the script:** choose `testDonation` in the function list at the top and press **Run**. Google asks for permission the first time; your own script is unverified, so choose **Advanced > Go to (your project) (unsafe)** and **Allow**. A **Ko-fi** tab appears with a `Script_Test` row. Type `skip` in that row's **Tracker** column.
+2. **You:** open the Google Sheet, then **Extensions > Apps Script**. Delete everything in the editor and paste the whole of `kofi_webhook.gs`. Put the token between the quotes on the `VERIFICATION_TOKEN` line and, if there was an old address, put it between the quotes on the `FORWARD_TO` line. Press **Save**.
+3. **Test the script:** choose `testDonation` in the function list at the top and press **Run**. Google asks for permission the first time; your own script is unverified, so choose **Advanced > Go to (your project) (unsafe)** and **Allow**. A **Ko-fi** tab appears with a `Script_Test` row. Type `skip` in that row's **Tracker** column. This editor test is never passed on to `FORWARD_TO`.
 4. **Publish it:** **Deploy > New deployment**, press the gear next to *Select type* and choose **Web app**. Set **Execute as: Me** and **Who has access: Anyone**, press **Deploy**, and copy the **Web app URL** (it ends in `/exec`).
-5. **The streamer:** paste that URL into Ko-fi's **webhook URL** box and press **Update**. Then send a test from the same page: a new row should appear on the Ko-fi tab within seconds. Type `skip` in its Tracker column too.
+5. **The streamer:** paste that URL into Ko-fi's **webhook URL** box and press **Update**. Then send a test from the same page, at a time a test is harmless on stream, and check:
+   - a new row appears on the Ko-fi tab within seconds (type `skip` in its Tracker column);
+   - if there was an old address, its **Forwarded** column says `sent`, and the widget reacts **once**, exactly as it did before the change.
+
+   If the widget does not react, or reacts twice, paste the old address back into Ko-fi and tell whoever set this up.
 6. **You:** add this to `config.json`, then start tracking:
 
    ```json
@@ -289,7 +304,7 @@ Ko-fi sends each donation to a web address (a *webhook*). `kofi_webhook.gs` is a
 
 How the Ko-fi tab works:
 
-- Columns: Received, Ko-fi time, Type, Name, Amount, Currency, Message, Public, Transaction ID, Message ID, Tracker.
+- Columns: Received, Ko-fi time, Type, Name, Amount, Currency, Message, Public, Transaction ID, Message ID, Tracker, Forwarded.
 - Only the types in `kofi_types` are counted (`Donation` and `Subscription` by default). Shop orders and commissions are listed but not counted.
 - A **private** donation (the supporter chose not to show it publicly) keeps its name and message off the sheet, and its amount goes to the Anonymous row.
 - Supporters' email addresses are never stored.
@@ -371,6 +386,7 @@ Events that were saved but not yet written (for example, during an internet outa
 | *Streamlabs refused the socket token* | The token is wrong or was reset. Ask the streamer for the current one. |
 | *Ko-fi donations are off: The spreadsheet has no tab called 'Ko-fi'* | The script has not written its first row yet, or `kofi_tab` does not match the tab's name. Run `testDonation` in the script once. |
 | *Ko-fi tab row N not counted: no rate for JPY in currency_rates* (or *Streamlabs donation not counted: ...*) | Add that currency to `currency_rates`, then type the amount into Dollars by hand for that donation. |
+| The **Forwarded** column says `failed: ...` or `sent, but it answered ...` | The old address (for example the widget's service) did not take that donation; the tracker still counts it. Add it in the widget by hand if it supports that. If it keeps happening, paste the old address back into Ko-fi. |
 | A Ko-fi donation never appears on the Ko-fi tab | Check the Web app URL in Ko-fi's webhook box, that **Who has access** is **Anyone**, and that `VERIFICATION_TOKEN` in the script matches Ko-fi's. |
 | The window does not appear | In a terminal in the tracker folder, run `.venv\Scripts\python.exe pandathon_gui.py` to see the error. |
 
@@ -379,5 +395,5 @@ Events that were saved but not yet written (for example, during an internet outa
 ## Keeping your keys safe
 
 - `service_account.json` can write to every sheet shared with it. The `.gitignore` in this repository keeps it, `config.json` and the `data/` folder out of Git. Check `git status` before every commit.
-- The Streamlabs socket token lives in `config.json`, so Git ignores it too. The Ko-fi verification token belongs only in the copy of `kofi_webhook.gs` inside the spreadsheet; keep the copy in this repository with its placeholder.
+- The Streamlabs socket token lives in `config.json`, so Git ignores it too. The Ko-fi verification token and the `FORWARD_TO` address belong only in the copy of `kofi_webhook.gs` inside the spreadsheet; keep the copy in this repository with its placeholders.
 - If the key was ever shared or committed, replace it: in Google Cloud, open the service account, go to **Keys**, delete the old key, and create a new one ([step 3](#3-create-the-google-key), parts 4 and 5). Deleting a file from Git does not remove it from the repository's history.

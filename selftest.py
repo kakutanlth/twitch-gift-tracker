@@ -671,5 +671,19 @@ plain = t.Tracker({**TOP, "channel": "chan", "min_cheer_bits": 100, "flush_secon
 results.append(check("donations are off by default", (plain.streamlabs_state, plain.kofi_state,
                      t.DEFAULT_CONFIG["streamlabs_socket_token"], t.DEFAULT_CONFIG["kofi_tab"]), ("off", "off", "", "")))
 
+# ---- 20. the Ko-fi script and the tracker agree on the Ko-fi tab's columns
+import re
+script = (Path(sys.argv[1]).resolve().parent / "kofi_webhook.gs").read_text(encoding="utf-8")
+script_headers = re.findall(r"'([^']*)'", re.search(r"const HEADERS = \[(.*?)\];", script, re.S).group(1))
+results += [
+    check("Ko-fi tab: the script's first columns are exactly the ones the tracker reads",
+          (script_headers[:len(t.KOFI_HEADERS)], script_headers[len(t.KOFI_HEADERS):]), (t.KOFI_HEADERS, ["Forwarded"])),
+    check("Ko-fi tab: a row with a Forwarded value is still read normally",
+          kofi_result(["", "", "Donation", "Jo", 3, "USD", "", "yes", "tx1", "m1", "", "sent"]), ("jo", 3.0, "added")),
+    check("Ko-fi script on GitHub keeps placeholders, not a token or forwarding address",
+          (re.search(r"const VERIFICATION_TOKEN = '([^']*)'", script).group(1), re.search(r"const FORWARD_TO = '([^']*)'", script).group(1)),
+          ("PASTE_THE_KOFI_VERIFICATION_TOKEN_HERE", "")),
+]
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)
